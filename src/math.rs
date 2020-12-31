@@ -300,13 +300,18 @@ impl Line {
 
 #[derive(Clone)]
 pub struct Geometry {
-    v_lines: Vec<Line>,
-    m_lines: Vec<Line>,
+    v_lines: Vec<(Point, Point)>,
+    m_lines: Vec<(Point, Point)>,
     effective_bounds: AABB,
     start_point: Point,
     previous_point: Point,
     max_angle: f32,
     reverse_points: bool,
+    sum: f32,
+    current_path_min_x: f32,
+    // Store the left most path's min x value and if it wraps left
+    left_most_path_min_x: f32,
+    left_most_path_wraps_right: bool,
 }
 
 impl ttf_parser::OutlineBuilder for Geometry {
@@ -314,10 +319,16 @@ impl ttf_parser::OutlineBuilder for Geometry {
         let next_point = Point::new(x0, y0);
         self.start_point = next_point;
         self.previous_point = next_point;
+
+        self.current_path_min_x = x0;
+        self.sum = 0.;
     }
 
     fn line_to(&mut self, x0: f32, y0: f32) {
+        self.current_path_min_x = self.current_path_min_x.min(x0);
         let next_point = Point::new(x0, y0);
+        self.sum += (next_point.x - self.previous_point.x) * (next_point.y + self.previous_point.y);
+
         self.push(self.previous_point, next_point);
         self.previous_point = next_point;
     }
@@ -325,6 +336,7 @@ impl ttf_parser::OutlineBuilder for Geometry {
     fn quad_to(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let control_point = Point::new(x0, y0);
         let next_point = Point::new(x1, y1);
+        self.sum += (next_point.x - self.previous_point.x) * (next_point.y + self.previous_point.y);
 
         const STEPS: u32 = 20;
         const INCREMENT: f32 = 1.0 / (STEPS as f32);
@@ -338,8 +350,10 @@ impl ttf_parser::OutlineBuilder for Geometry {
                 let temp_point = curve.point(t);
                 self.push(self.previous_point, temp_point);
                 self.previous_point = temp_point;
+                self.current_path_min_x = self.current_path_min_x.min(temp_point.x);
             }
         }
+        self.current_path_min_x = self.current_path_min_x.min(next_point.x);
         self.push(self.previous_point, next_point);
 
         self.previous_point = next_point;
@@ -349,6 +363,7 @@ impl ttf_parser::OutlineBuilder for Geometry {
         let first_control = Point::new(x0, y0);
         let second_control = Point::new(x1, y1);
         let next_point = Point::new(x2, y2);
+        self.sum += (next_point.x - self.previous_point.x) * (next_point.y + self.previous_point.y);
 
         const STEPS: u32 = 20;
         const INCREMENT: f32 = 1.0 / (STEPS as f32);
@@ -362,6 +377,7 @@ impl ttf_parser::OutlineBuilder for Geometry {
                 let temp_point = curve.point(t);
                 self.push(self.previous_point, temp_point);
                 self.previous_point = temp_point;
+                self.current_path_min_x = self.current_path_min_x.min(temp_point.x);
             }
         }
         self.push(self.previous_point, next_point);
@@ -370,6 +386,14 @@ impl ttf_parser::OutlineBuilder for Geometry {
     }
 
     fn close(&mut self) {
+        self.sum += (self.start_point.x - self.previous_point.x) * (self.start_point.y + self.previous_point.y);
+
+        // If the path we're closing is the left most path we've seen so far then store its wrapping direction.
+        if self.current_path_min_x < self.left_most_path_min_x {
+            self.left_most_path_min_x = self.current_path_min_x;
+            self.left_most_path_wraps_right = self.sum > 0.;
+        }
+
         if self.start_point != self.previous_point {
             self.push(self.previous_point, self.start_point);
         }
@@ -403,41 +427,56 @@ impl Geometry {
             previous_point: Point::default(),
             max_angle,
             reverse_points,
+            sum: 0.,
+            current_path_min_x: f32::MAX,
+            left_most_path_min_x: f32::MAX,
+            left_most_path_wraps_right: true,
         }
     }
 
     fn push(&mut self, start: Point, end: Point) {
         if start.y != end.y {
-            let (start, end) = if self.reverse_points {
-                (end, start)
-            } else {
-                (start, end)
-            };
             if start.x == end.x {
-                self.v_lines.push(Line::new(start, end));
+                self.v_lines.push((start, end));
             } else {
-                self.m_lines.push(Line::new(start, end));
+                self.m_lines.push((start, end));
             }
         }
     }
 
     pub(crate) fn finalize(mut self, glyph: &mut Glyph) {
-        if self.v_lines.is_empty() && self.m_lines.is_empty() {
+        let reverse_points = !self.left_most_path_wraps_right;
+        let mut v_lines: Vec<Line> = self.v_lines.iter().copied().map(|(start, end)| 
+        if reverse_points {
+            Line::new(end, start)
+        } else {
+            Line::new(start, end)
+        }).collect();
+
+        let mut m_lines: Vec<Line> = self.m_lines.iter().copied().map(|(start, end)| 
+            if reverse_points {
+                Line::new(end, start)
+            } else {
+                Line::new(start, end)
+            }).collect();
+        
+        if v_lines.is_empty() && m_lines.is_empty() {
             self.effective_bounds = AABB::default();
         } else {
-            for line in self.v_lines.iter().chain(self.m_lines.iter()) {
+            for line in v_lines.iter().chain(m_lines.iter()) {
                 let (x0, y0, x1, y1) = line.coords.copied();
                 Self::recalculate_bounds(&mut self.effective_bounds, x0, y0);
                 Self::recalculate_bounds(&mut self.effective_bounds, x1, y1);
             }
-            for line in self.v_lines.iter_mut().chain(self.m_lines.iter_mut()) {
+            for line in v_lines.iter_mut().chain(m_lines.iter_mut()) {
                 line.reposition(self.effective_bounds);
             }
-            self.v_lines.shrink_to_fit();
-            self.m_lines.shrink_to_fit();
+            v_lines.shrink_to_fit();
+            m_lines.shrink_to_fit();
         }
-        glyph.v_lines = self.v_lines;
-        glyph.m_lines = self.m_lines;
+
+        glyph.v_lines = v_lines;
+        glyph.m_lines = m_lines;
         glyph.bounds = OutlineBounds {
             xmin: self.effective_bounds.xmin,
             ymin: self.effective_bounds.ymin,
