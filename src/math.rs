@@ -386,7 +386,8 @@ impl ttf_parser::OutlineBuilder for Geometry {
     }
 
     fn close(&mut self) {
-        self.sum += (self.start_point.x - self.previous_point.x) * (self.start_point.y + self.previous_point.y);
+        self.sum +=
+            (self.start_point.x - self.previous_point.x) * (self.start_point.y + self.previous_point.y);
 
         // If the path we're closing is the left most path we've seen so far then store its wrapping direction.
         if self.current_path_min_x < self.left_most_path_min_x {
@@ -446,20 +447,32 @@ impl Geometry {
 
     pub(crate) fn finalize(mut self, glyph: &mut Glyph) {
         let reverse_points = !self.left_most_path_wraps_right;
-        let mut v_lines: Vec<Line> = self.v_lines.iter().copied().map(|(start, end)| 
-        if reverse_points {
-            Line::new(end, start)
-        } else {
-            Line::new(start, end)
-        }).collect();
+        let mut v_lines: Vec<Line> = self
+            .v_lines
+            .iter()
+            .copied()
+            .map(|(start, end)| {
+                if reverse_points {
+                    Line::new(end, start)
+                } else {
+                    Line::new(start, end)
+                }
+            })
+            .collect();
 
-        let mut m_lines: Vec<Line> = self.m_lines.iter().copied().map(|(start, end)| 
-            if reverse_points {
-                Line::new(end, start)
-            } else {
-                Line::new(start, end)
-            }).collect();
-        
+        let mut m_lines: Vec<Line> = self
+            .m_lines
+            .iter()
+            .copied()
+            .map(|(start, end)| {
+                if reverse_points {
+                    Line::new(end, start)
+                } else {
+                    Line::new(start, end)
+                }
+            })
+            .collect();
+
         if v_lines.is_empty() && m_lines.is_empty() {
             self.effective_bounds = AABB::default();
         } else {
